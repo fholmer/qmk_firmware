@@ -19,14 +19,16 @@
 led_config_t g_led_config = {
     {
         // Key Matrix to LED Index
+        // Chain positions 3-4 are the indicator bar, not keys: the two
+        // bottom-row keys that have no LED of their own map to NO_LED.
         {  54,  55,  56,  57,  58,  59,  60,  61,  62,  63,  64,  65,  66,  67,  __ },
         {  53,  52,  51,  50,  49,  48,  47,  46,  45,  44,  43,  42,  41,  40,  39 },
         {  25,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  __,  37,  38 },
         {  24,  __,  20,  19,  18,  17,  16,  15,  14,  13,  12,  11,  10,   9,   8 },
-        {  23,  22,  21,  __,  __,   0,  __,  __,   3,   4,   1,   2,   5,   6,   7 },
+        {  23,  22,  21,  __,  __,   0,  __,  __,  __,  __,   1,   2,   5,   6,   7 },
     },
     {
-        // LED Index to Physical Position
+        // LED Index to Physical Position (3-4 = indicator bar at x=187)
         {89,64}, {150,64}, {170,64}, {187,55}, {187,59}, {194,64}, {209,64}, {224,64}, {224,48},
         {224,48}, {189,48}, {168,48}, {153,48}, {138,48}, {123,48}, {108,48}, {93,48}, {78,48},
         {63,48}, {48,48}, {33,48}, {39,48}, {19,64}, {2,64}, {8,48}, {6,32}, {26,32}, {41,32},
@@ -37,13 +39,18 @@ led_config_t g_led_config = {
         {165,0}, {180,0}, {203,0}
     },
     {
-        // LED Flags (4 = LED_FLAG_KEYLIGHT for all per-key LEDs)
-        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        // LED Flags (4 = LED_FLAG_KEYLIGHT; 0 on the indicator bar at 3-4
+        // so RGB effects leave it alone)
+        4, 4, 4, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
         4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
         4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
         4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     }
 };
+
+// Indicator bar: 2 LEDs mid-chain (position 3 = upper, 4 = lower half)
+#define IND_LED_UPPER 3
+#define IND_LED_LOWER 4
 
 #undef __
 
@@ -55,6 +62,10 @@ static enum kb_mode_t prev_kb_mode = KB_MODE_DEFAULT;
 // Long-press tracking for BLE pairing
 static uint32_t ble_key_timer = 0;
 static uint8_t  ble_key_mode = 0;
+
+// Indicator-bar pairing state (rendered in indicator_bar_render)
+static bool     ind_pairing = false;
+static uint32_t ind_pairing_timer = 0;
 
 // Battery
 static uint8_t  battery_level_pct = 100;
@@ -536,6 +547,8 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                         uprintf("BLE PAIR mode=%u\n", profile);
                         WIRELESS_PAIR(profile);
                         connect_timer = timer_read32();
+                        ind_pairing = true;
+                        ind_pairing_timer = timer_read32();
                     }
                     ble_key_mode = 0;
                 }
@@ -555,10 +568,65 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // LED indices for number keys 1-0
-// Physical WS2812 chain has 2 extra LEDs at the start not in keyboard.json,
-// so all indices are +2 from the layout array (confirmed by user's LED_CAPS=25, LED_1=55)
 #define LED_NUM_1 55
 #define LED_NUM_COUNT 10
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Indicator bar — wireless status on the elongated lamp (chain LEDs 3-4)
+//
+// USB mode:            off
+// Wireless, connected: solid channel color for a few seconds, then off
+// Wireless, searching: slow blink in channel color
+// Pairing (long-press): fast blink in channel color
+// Channel colors: BT1 blue, BT2 cyan, BT3 magenta, 2.4G green
+// ─────────────────────────────────────────────────────────────────────────────
+
+#define IND_CONNECTED_SHOW_MS 3000
+#define IND_PAIRING_WINDOW_MS 30000
+#define IND_BLINK_SLOW_MS 500
+#define IND_BLINK_FAST_MS 150
+
+static void indicator_bar_render(void) {
+    static bool     prev_conn = false;
+    static uint32_t conn_show_timer = 0;
+
+    if (kb_mode != KB_MODE_BLE && kb_mode != KB_MODE_24G) {
+        rgb_matrix_set_color(IND_LED_UPPER, 0, 0, 0);
+        rgb_matrix_set_color(IND_LED_LOWER, 0, 0, 0);
+        prev_conn = wireless_connected;
+        return;
+    }
+
+    // Channel color
+    uint8_t r = 0, g = 0, b = 0;
+    if (kb_mode == KB_MODE_24G) {
+        g = 255;
+    } else {
+        switch (last_wireless_mode) {
+            case 1: b = 255; break;              // BT1 blue
+            case 2: g = 255; b = 255; break;     // BT2 cyan
+            default: r = 255; b = 255; break;    // BT3 magenta
+        }
+    }
+
+    bool show;
+    if (wireless_connected) {
+        ind_pairing = false;
+        if (!prev_conn) conn_show_timer = timer_read32();
+        show = timer_elapsed32(conn_show_timer) < IND_CONNECTED_SHOW_MS;
+    } else {
+        if (ind_pairing && timer_elapsed32(ind_pairing_timer) > IND_PAIRING_WINDOW_MS) {
+            ind_pairing = false;
+        }
+        uint32_t period = ind_pairing ? IND_BLINK_FAST_MS : IND_BLINK_SLOW_MS;
+        show = (timer_read32() / period) & 1;
+    }
+    prev_conn = wireless_connected;
+
+    if (!show) r = g = b = 0;
+    rgb_matrix_set_color(IND_LED_UPPER, r, g, b);
+    rgb_matrix_set_color(IND_LED_LOWER, r, g, b);
+}
 
 bool rgb_matrix_indicators_advanced_kb(uint8_t led_min, uint8_t led_max) {
     // Battery display when KC_BAT is held
@@ -588,6 +656,8 @@ bool rgb_matrix_indicators_advanced_kb(uint8_t led_min, uint8_t led_max) {
     if (!wireless_connected && (kb_mode == KB_MODE_BLE || kb_mode == KB_MODE_24G)) {
         rgb_matrix_set_color_all(0, 0, 0);
     }
+
+    indicator_bar_render();
 
     return rgb_matrix_indicators_advanced_user(led_min, led_max);
 }
