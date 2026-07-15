@@ -360,7 +360,14 @@ static void sc_ble_mouse(report_mouse_t *report) {
     static uint8_t last_report[sizeof(report_mouse_t)] = {0};
 
     if (!wireless_connected) return;
-    if (!has_mouse_report_changed((report_mouse_t *)last_report, report)) return;
+    // Always forward motion reports — even identical consecutive deltas move
+    // the cursor. Only skip exact duplicates without motion (e.g. repeated
+    // all-zero reports). The previous has_mouse_report_changed() call had its
+    // new/old arguments swapped (a bug inherited from the mk637 reference
+    // code, the cause of broken mouse-over-BT in factory firmware < 1.1.9)
+    // and dropped every motion report.
+    bool has_motion = report->x || report->y || report->v || report->h;
+    if (!has_motion && memcmp(last_report, report, sizeof(report_mouse_t)) == 0) return;
 
     smart_ble_wakeup();
     memcpy(last_report, report, sizeof(report_mouse_t));
