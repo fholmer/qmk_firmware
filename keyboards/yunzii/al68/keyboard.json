@@ -63,7 +63,8 @@
             "rainbow_moving_chevron": false,
             "rainbow_pinwheels": false
         },
-        "driver": "ws2812"
+        "driver": "ws2812",
+        "sleep": true
     },
     "url": "https://www.yunzii.com",
     "usb": {
