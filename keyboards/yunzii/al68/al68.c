@@ -88,6 +88,7 @@ static uint32_t debug_timer = 0;
 
 // Deferred EEPROM save (flash write stalls CPU ~20ms, breaks UART)
 static bool     ble_save_pending = false;
+static uint32_t ble_save_timer = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mode detection
@@ -154,11 +155,15 @@ static void enter_deep_sleep(void) {
         eeconfig_update_kb((uint32_t)(last_wireless_mode & 3));
     }
 
-    // Turn off LEDs before sleep — flush black data to WS2812 chain
+    // Turn off LEDs before sleep — flush black data to WS2812 chain.
+    // The flush is an async PWM/DMA transfer taking ~2.3 ms for 68 LEDs;
+    // entering STOP mid-transfer freezes the driver in a busy state and
+    // corrupts the WS2812 signal on wake (all LEDs latch white). Wait for
+    // the full frame + reset pulse to finish.
     rgb_matrix_set_color_all(0, 0, 0);
     rgb_matrix_driver.flush();
     rgb_matrix_disable_noeeprom();
-    wait_ms(1);
+    wait_ms(5);
 
     // Stop wireless module (keep BLE driver for easy re-start)
     WIRELESS_STOPOWER();
@@ -218,11 +223,14 @@ static void enter_deep_sleep(void) {
 
     // ─── WOKE UP ───
 
-    // Disable all EXTI events we configured (lines 0-15)
+    // Disable all EXTI events we configured (lines 0-15) and clear any
+    // pending flags so a stale edge can't fire once interrupts resume
+    // (the reference firmware clears PR here too)
     EXTI->IMR  &= ~0xFFFF;
     EXTI->EMR  &= ~0xFFFF;
     EXTI->RTSR &= ~0xFFFF;
     EXTI->FTSR &= ~0xFFFF;
+    EXTI->PR    = 0xFFFF;
 
     // Re-init clocks (after STOP, MCU runs on HSI 8MHz)
     stm32_clock_init();
@@ -242,6 +250,11 @@ static void enter_deep_sleep(void) {
 
     // Re-init ADC
     battery_adc_init();
+
+    // Re-init UART to the BLE module and drop any stale key state
+    // (reference firmware does clear_keyboard() on wake)
+    uart_init(460800);
+    clear_keyboard();
 
     // Check mode and start wireless
     get_mode();
@@ -344,6 +357,15 @@ void keyboard_post_init_kb(void) {
 
 void housekeeping_task_kb(void) {
     get_mode();
+
+    // Persist the BLE channel a few seconds after switching. Previously this
+    // was only flushed on deep sleep, so a power-cycle before the keyboard
+    // ever slept lost the switch and boot always came back on channel 1.
+    if (ble_save_pending && timer_elapsed32(ble_save_timer) > 3000) {
+        ble_save_pending = false;
+        eeconfig_update_kb((uint32_t)(last_wireless_mode & 3));
+        uprintf("BLE profile %u saved\n", last_wireless_mode & 3);
+    }
 
     // ── Mode change handling ──
     if (kb_mode != prev_kb_mode) {
@@ -538,6 +560,7 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
                     if (last_wireless_mode != profile) {
                         WIRELESS_START(profile);
                         ble_save_pending = true;
+                        ble_save_timer = timer_read32();
                         connect_timer = timer_read32();
                     }
                 } else {
