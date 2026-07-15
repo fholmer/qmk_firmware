@@ -1,11 +1,11 @@
 {
     "manufacturer": "YUNZII Keyboard",
-    "keyboard_name": "AL68",
+    "keyboard_name": "AL68 (fholmer)",
     "maintainer": "Jeff",
     "bootloader": "stm32duino",
     "diode_direction": "ROW2COL",
     "encoder": {
-        "rotary": [{ "pin_a": "A7", "pin_b": "A6" }]
+        "rotary": [{ "pin_a": "A6", "pin_b": "A7" }]
     },
     "features": {
         "bootmagic": true,
@@ -67,10 +67,10 @@
     },
     "url": "https://www.yunzii.com",
     "usb": {
-        "device_version": "1.0.2",
+        "device_version": "2.0.0",
         "no_startup_check": false,
         "pid": "0x304E",
-        "vid": "0x414A"
+        "vid": "0x4D4B"
     },
     "ws2812": {
         "driver": "pwm",
