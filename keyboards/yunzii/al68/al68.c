@@ -265,7 +265,21 @@ static void enter_deep_sleep(void) {
 // Init
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The weak upstream bootloader_jump() is a bare NVIC_SystemReset(); it relies
+// on the DFU flag already being set by board.c. Since we clear that flag in
+// keyboard_pre_init_kb(), set it here so QK_BOOT still enters the bootloader.
+void bootloader_jump(void) {
+    BKP->DR10 = RTC_BOOTLOADER_FLAG;
+    NVIC_SystemReset();
+}
+
 void keyboard_pre_init_kb(void) {
+    // board.c (STM32_F103_STM32DUINO) sets BKP->DR10 = RTC_BOOTLOADER_FLAG on
+    // every boot. BKP registers are battery-backed, so on this board the flag
+    // survives a replug and the bootloader stays in DFU mode. Clear it so a
+    // normal reboot works.
+    BKP->DR10 = 0;
+
     // Free JTAG pins for matrix use (GD32F103 requires two-step write)
     AFIO->MAPR = (AFIO->MAPR & ~AFIO_MAPR_SWJ_CFG_Msk);
     AFIO->MAPR |= AFIO_MAPR_SWJ_CFG_DISABLE;
