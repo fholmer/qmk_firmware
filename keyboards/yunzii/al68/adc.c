@@ -1,4 +1,5 @@
-// Copyright 2024 QMK
+// Copyright 2026 karamanliev (@karamanliev)
+// Copyright 2026 Frode Holmer (@fholmer)
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Bare-metal ADC driver for GD32F103 battery monitoring on B1 (channel 9).

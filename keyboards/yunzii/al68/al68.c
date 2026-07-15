@@ -1,4 +1,7 @@
-// Copyright 2024 QMK
+// Copyright 2024 Jeff (@yunziikeyboard)
+// Copyright 2026 karamanliev (@karamanliev)
+// Copyright 2026 djcastaldo (@djcastaldo)
+// Copyright 2026 Frode Holmer (@fholmer)
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "quantum.h"
