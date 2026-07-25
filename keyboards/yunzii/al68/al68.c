@@ -581,6 +581,27 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
             }
             return false;
 
+        // 2.4GHz re-pairing. The dongle ships paired from the factory, so this
+        // is only needed if that pairing is lost. Same hold-to-pair gesture as
+        // the BLE keys; mode 4 is the module's 2.4G channel.
+        case KC_24G:
+            if (kb_mode == KB_MODE_24G) {
+                if (record->event.pressed) {
+                    ble_key_timer = timer_read32();
+                    ble_key_mode = 4;
+                } else {
+                    if (ble_key_mode == 4 &&
+                        timer_elapsed32(ble_key_timer) > BLE_PAIR_HOLD_MS) {
+                        uprintf("24G PAIR\n");
+                        WIRELESS_PAIR(4);
+                        connect_timer = timer_read32();
+                        ind_pairing = true;
+                        ind_pairing_timer = timer_read32();
+                    }
+                    ble_key_mode = 0;
+                }
+            }
+            return false;
 
         case KC_BAT:
             battery_display_active = record->event.pressed;
