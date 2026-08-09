@@ -36,11 +36,12 @@ Local additions on top: fixed mouse-over-BT (swapped arguments to `has_mouse_rep
 
 ## Wireless
 
-The mode (BT / USB / 2.4GHz) is selected by the physical 3-position slide
-switch — no keycode changes it. `KC_BLE1`-`KC_BLE3` and `KC_24G` only act while
-the switch is already in the matching position.
+The radio (BT / 2.4GHz) is selected by the physical 3-position slide switch.
+`KC_BLE1`-`KC_BLE3` and `KC_24G` only act while the switch is in the matching
+position.
 
 * **BT channel:** tap `KC_BLE1`/`KC_BLE2`/`KC_BLE3` (Fn+Q/W/E in the default keymap). The channel is saved to EEPROM ~3 s later.
 * **Pairing:** hold the same key for 3 s and release. `KC_24G` (Fn+R) does the same for the 2.4GHz dongle, which is otherwise only paired at the factory.
+* **USB without moving the switch:** `KC_USB` (Fn+Tab). The switch does not cut the USB data lines — with a cable attached the USB device is enumerated in every switch position, and only the BLE host driver diverts keystrokes to the module. `KC_USB` forces `kb_mode` to `KB_MODE_USB`, which stops the radio and hands reports back to the cable. It is ignored on battery. Any `KC_BLE*`/`KC_24G` key returns to wireless, as does moving the switch, unplugging the cable, or a power cycle — the override is deliberately not persisted.
 * The indicator bar blinks fast in the channel colour while pairing, slow while reconnecting, and goes solid for 3 s once connected.
 * If no connection is made within 20 s, the board enters deep sleep. Any keypress wakes it.

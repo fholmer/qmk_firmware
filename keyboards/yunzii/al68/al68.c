@@ -95,16 +95,39 @@ static uint32_t ble_save_timer = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mode detection
+//
+// The slide switch only tells the firmware which radio to drive; it does not
+// cut the USB data lines. With a cable attached, keyboard_pre_init_kb() raises
+// RENUM_PIN in every switch position, so the USB device stays enumerated even
+// in BT/2.4GHz — the only thing sending keystrokes to the module instead of
+// the cable is the BLE host driver. KC_USB exploits that: it forces kb_mode to
+// KB_MODE_USB while the switch still says wireless, and the existing mode
+// change handling in housekeeping_task_kb() does the rest.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Raw switch position, as opposed to kb_mode which the override can steer
+static enum kb_mode_t switch_mode = KB_MODE_DEFAULT;
+static bool           usb_override = false;
+
 static void get_mode(void) {
+    enum kb_mode_t pin_mode;
     if (!gpio_read_pin(BLE_PIN)) {
-        kb_mode = KB_MODE_BLE;
+        pin_mode = KB_MODE_BLE;
     } else if (!gpio_read_pin(TWO_MODE_PIN)) {
-        kb_mode = KB_MODE_24G;
+        pin_mode = KB_MODE_24G;
     } else {
-        kb_mode = KB_MODE_USB;
+        pin_mode = KB_MODE_USB;
     }
+
+    // Moving the switch, or pulling the cable, voids the override — without
+    // the latter the board would sit in "USB mode" on battery with no host,
+    // never reaching the sleep conditions below.
+    if (pin_mode != switch_mode || !gpio_read_pin(PLUG_IN_PIN)) {
+        usb_override = false;
+    }
+    switch_mode = pin_mode;
+
+    kb_mode = usb_override ? KB_MODE_USB : pin_mode;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +282,10 @@ static void enter_deep_sleep(void) {
     uart_init(460800);
     clear_keyboard();
 
-    // Check mode and start wireless
+    // Check mode and start wireless. The override never survives sleep — the
+    // board only gets here on the wireless paths, and coming back on the cable
+    // would leave the radio down with nothing to reconnect it.
+    usb_override = false;
     get_mode();
     if (kb_mode == KB_MODE_BLE) {
         last_wireless_mode &= 3;
@@ -515,8 +541,11 @@ void housekeeping_task_kb(void) {
 // Called from QMK's USB suspend loop. If the physical switch is in wireless
 // position, break out of suspend so housekeeping can handle the mode change.
 void suspend_power_down_kb(void) {
-    // Read physical pins directly — kb_mode may be stale during USB suspend
-    bool wireless_switch = !gpio_read_pin(BLE_PIN) || !gpio_read_pin(TWO_MODE_PIN);
+    // Read physical pins directly — kb_mode may be stale during USB suspend.
+    // Under the KC_USB override the switch still reads wireless, but the cable
+    // is the active link, so suspend must behave exactly as in USB mode;
+    // tearing USB down here would silently end the override on host sleep.
+    bool wireless_switch = (!gpio_read_pin(BLE_PIN) || !gpio_read_pin(TWO_MODE_PIN)) && !usb_override;
     if (wireless_switch) {
         gpio_write_pin_low(RENUM_PIN);
         usb_disconnect();  // USB_DRIVER.state → USB_STOP, exits suspend loop
@@ -552,15 +581,38 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
     }
 
     switch (keycode) {
+        // Type over the cable without touching the slide switch. Only useful
+        // while the switch says wireless and a cable is actually attached;
+        // housekeeping_task_kb() performs the switch on the next tick.
+        case KC_USB:
+            if (record->event.pressed && switch_mode != KB_MODE_USB &&
+                gpio_read_pin(PLUG_IN_PIN)) {
+                uprintf("USB override on (switch=%u)\n", switch_mode);
+                usb_override = true;
+            }
+            return false;
+
         case KC_BLE1:
         case KC_BLE2:
         case KC_BLE3:
-            if (kb_mode == KB_MODE_BLE) {
+            // Gated on the switch, not kb_mode, so these also serve as the way
+            // back out of the USB override.
+            if (switch_mode == KB_MODE_BLE) {
                 uint8_t profile = keycode - KC_USB;  // 1, 2, or 3
                 if (record->event.pressed) {
                     ble_key_timer = timer_read32();
                     ble_key_mode = profile;
-                    if (last_wireless_mode != profile) {
+                    if (usb_override) {
+                        // Leaving the override: housekeeping sees kb_mode go
+                        // USB -> BLE next tick and starts last_wireless_mode,
+                        // so set the channel rather than starting it twice.
+                        uprintf("USB override off\n");
+                        usb_override = false;
+                        last_wireless_mode = profile;
+                        ble_save_pending = true;
+                        ble_save_timer = timer_read32();
+                        connect_timer = timer_read32();
+                    } else if (last_wireless_mode != profile) {
                         WIRELESS_START(profile);
                         ble_save_pending = true;
                         ble_save_timer = timer_read32();
@@ -585,10 +637,17 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
         // is only needed if that pairing is lost. Same hold-to-pair gesture as
         // the BLE keys; mode 4 is the module's 2.4G channel.
         case KC_24G:
-            if (kb_mode == KB_MODE_24G) {
+            if (switch_mode == KB_MODE_24G) {
                 if (record->event.pressed) {
                     ble_key_timer = timer_read32();
                     ble_key_mode = 4;
+                    if (usb_override) {
+                        // As for the BLE keys: housekeeping restarts 2.4GHz
+                        // when it sees kb_mode go USB -> 24G next tick.
+                        uprintf("USB override off\n");
+                        usb_override = false;
+                        connect_timer = timer_read32();
+                    }
                 } else {
                     if (ble_key_mode == 4 &&
                         timer_elapsed32(ble_key_timer) > BLE_PAIR_HOLD_MS) {

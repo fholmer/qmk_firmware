@@ -45,8 +45,23 @@ static void    sc_ble_extra(report_extra_t *report);
 static void    sc_ble_keyboard(report_keyboard_t *report);
 static void    sc_send_nkro(report_nkro_t *report);
 
+#ifdef RAW_ENABLE
+// The ChibiOS USB raw-HID send path. Not declared in any header, so declare it
+// the same way tmk_core/protocol/chibios/chibios.c does.
+void send_raw_hid(uint8_t *data, uint8_t length);
+#endif
+
+// Keystrokes are routed to the wireless module, but raw HID (VIA) stays on USB:
+// the BLE module has no raw-HID channel, and raw_hid_task() reads the USB OUT
+// endpoint directly regardless of which host driver is active. Without this
+// member host_raw_hid_send() finds a NULL pointer and drops every reply, so VIA
+// commands are executed but never acknowledged. send_raw_hid() checks for
+// USB_ACTIVE itself, so on battery with no cable this is a no-op.
 static host_driver_t sc_ble_driver = {
-    sc_ble_leds, sc_ble_keyboard, sc_send_nkro, sc_ble_mouse, sc_ble_extra
+    sc_ble_leds, sc_ble_keyboard, sc_send_nkro, sc_ble_mouse, sc_ble_extra,
+#ifdef RAW_ENABLE
+    send_raw_hid,
+#endif
 };
 
 /* -------------------- Rate limiting helper -------------------------------- */
