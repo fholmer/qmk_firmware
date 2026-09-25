@@ -57,8 +57,6 @@ led_config_t g_led_config = {
 
 #undef __
 
-extern void stm32_clock_init(void);
-
 enum kb_mode_t kb_mode = KB_MODE_DEFAULT;
 static enum kb_mode_t prev_kb_mode = KB_MODE_DEFAULT;
 
@@ -169,6 +167,69 @@ static void battery_update(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WS2812 stream and clock tree across STOP mode
+//
+// The WS2812 driver never finishes a transfer: circular DMA paced by the PWM
+// timer re-sends the frame buffer forever. On wake the MCU runs on the 8 MHz
+// HSI until the clock tree is rebuilt, so the stream carries on at 1/9 speed.
+// Every bit is then high long enough to read as a 1, and the whole chain goes
+// full white, whatever the buffer holds. Should the rebuild never finish, that
+// white frame is refreshed until the battery is flat — with no way to turn the
+// board off. So the timer is parked with the data line low across sleep and
+// only restarted once the clock is back.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void ws2812_park(void) {
+    WS2812_PWM_DRIVER.tim->CR1 &= ~STM32_TIM_CR1_CEN;
+    gpio_write_pin_low(WS2812_DI_PIN);
+    gpio_set_pin_output(WS2812_DI_PIN);
+}
+
+static void ws2812_unpark(void) {
+    palSetLineMode(WS2812_DI_PIN, PAL_MODE_ALTERNATE_PUSHPULL);
+    WS2812_PWM_DRIVER.tim->CR1 |= STM32_TIM_CR1_CEN;
+}
+
+// Well over 100 ms at 8 MHz; HSE normally locks within a few ms
+#define CLOCK_WAIT_LOOPS 1000000
+
+static bool wait_for_bits(volatile uint32_t *reg, uint32_t mask, uint32_t value) {
+    for (uint32_t i = 0; i < CLOCK_WAIT_LOOPS; i++) {
+        if ((*reg & mask) == value) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ChibiOS stm32_clock_init() with bounded waits. The upstream version spins
+// forever if the HSE crystal or the PLL fails to lock. HSI is selected before
+// CR is cleared, as in the newer ChibiOS F1 ports, so this is also safe should
+// WFI return without STOP ever having stopped the PLL.
+static bool wake_clock_init(void) {
+    RCC->CR |= RCC_CR_HSION;
+    if (!wait_for_bits(&RCC->CR, RCC_CR_HSIRDY, RCC_CR_HSIRDY)) return false;
+    RCC->CFGR &= ~RCC_CFGR_SW;
+    if (!wait_for_bits(&RCC->CFGR, RCC_CFGR_SWS, RCC_CFGR_SWS_HSI)) return false;
+    RCC->CR &= RCC_CR_HSITRIM | RCC_CR_HSION;
+    RCC->CFGR = 0;
+
+    RCC->CR |= RCC_CR_HSEON;
+    if (!wait_for_bits(&RCC->CR, RCC_CR_HSERDY, RCC_CR_HSERDY)) return false;
+
+    RCC->CFGR |= STM32_PLLMUL | STM32_PLLXTPRE | STM32_PLLSRC;
+    RCC->CR |= RCC_CR_PLLON;
+    if (!wait_for_bits(&RCC->CR, RCC_CR_PLLRDY, RCC_CR_PLLRDY)) return false;
+
+    RCC->CFGR = STM32_MCOSEL | STM32_USBPRE | STM32_PLLMUL | STM32_PLLXTPRE |
+                STM32_PLLSRC | STM32_ADCPRE | STM32_PPRE2  | STM32_PPRE1    |
+                STM32_HPRE;
+    FLASH->ACR = STM32_FLASHBITS;
+    RCC->CFGR |= STM32_SW;
+    return wait_for_bits(&RCC->CFGR, RCC_CFGR_SWS, STM32_SW << 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Deep sleep (MCU STOP mode via WFI)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -182,14 +243,13 @@ static void enter_deep_sleep(void) {
     }
 
     // Turn off LEDs before sleep — flush black data to WS2812 chain.
-    // The flush is an async PWM/DMA transfer taking ~2.3 ms for 68 LEDs;
-    // entering STOP mid-transfer freezes the driver in a busy state and
-    // corrupts the WS2812 signal on wake (all LEDs latch white). Wait for
-    // the full frame + reset pulse to finish.
+    // One frame plus reset pulse takes ~2.3 ms for 68 LEDs; wait until the
+    // chain has latched black at least once, then park the stream.
     rgb_matrix_set_color_all(0, 0, 0);
     rgb_matrix_driver.flush();
     rgb_matrix_disable_noeeprom();
     wait_ms(5);
+    ws2812_park();
 
     // Stop wireless module (keep BLE driver for easy re-start)
     WIRELESS_STOPOWER();
@@ -258,8 +318,12 @@ static void enter_deep_sleep(void) {
     EXTI->FTSR &= ~0xFFFF;
     EXTI->PR    = 0xFFFF;
 
-    // Re-init clocks (after STOP, MCU runs on HSI 8MHz)
-    stm32_clock_init();
+    // Re-init clocks (after STOP, MCU runs on HSI 8MHz). If they will not
+    // come back, reset rather than hang; the LEDs are parked black.
+    if (!wake_clock_init()) {
+        NVIC_SystemReset();
+    }
+    ws2812_unpark();
 
     // Re-init pins
     gpio_set_pin_input(BLE_PIN);
@@ -502,9 +566,13 @@ void housekeeping_task_kb(void) {
     // ── Sleep conditions ──
     bool should_sleep = false;
 
-    // Connection timeout: not connected for 20s → sleep
+    // Connection timeout: not connected for 20s → sleep. A pairing request
+    // gets longer, since the host still has to be found and clicked through;
+    // sleeping stops the module and aborts the pairing.
+    bool     pairing = ind_pairing && timer_elapsed32(ind_pairing_timer) < PAIRING_TIMEOUT_MS;
+    uint32_t connect_timeout = pairing ? PAIRING_TIMEOUT_MS : CONNECT_TIMEOUT_MS;
     if (!wireless_connected &&
-        timer_elapsed32(connect_timer) > CONNECT_TIMEOUT_MS) {
+        timer_elapsed32(connect_timer) > connect_timeout) {
         uprintf("SLEEP: connect timeout\n");
         should_sleep = true;
     }
@@ -688,7 +756,6 @@ bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #define IND_CONNECTED_SHOW_MS 3000
-#define IND_PAIRING_WINDOW_MS 30000
 #define IND_BLINK_SLOW_MS 500
 #define IND_BLINK_FAST_MS 150
 
@@ -721,7 +788,7 @@ static void indicator_bar_render(void) {
         if (!prev_conn) conn_show_timer = timer_read32();
         show = timer_elapsed32(conn_show_timer) < IND_CONNECTED_SHOW_MS;
     } else {
-        if (ind_pairing && timer_elapsed32(ind_pairing_timer) > IND_PAIRING_WINDOW_MS) {
+        if (ind_pairing && timer_elapsed32(ind_pairing_timer) > PAIRING_TIMEOUT_MS) {
             ind_pairing = false;
         }
         uint32_t period = ind_pairing ? IND_BLINK_FAST_MS : IND_BLINK_SLOW_MS;

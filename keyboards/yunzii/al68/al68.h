@@ -20,6 +20,7 @@
 #define WIRELESS_LED_TIMEOUT_MS   180000   // 3 min — turn off LEDs when idle
 #define CONNECTED_IDLE_SLEEP_MS   185000   // ~3 min + 5s — sleep after LEDs already off
 #define CONNECT_TIMEOUT_MS        20000    // 20s — sleep if wireless not connected
+#define PAIRING_TIMEOUT_MS        60000    // 60s — stay awake after a pairing request
 #define BATTERY_CHECK_INTERVAL_MS 30000    // 30s
 #define DEBUG_INTERVAL_MS         10000    // 10s — periodic debug heartbeat
 
